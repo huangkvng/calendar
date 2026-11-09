@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Phiên giao dịch Forex</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --surface-0: #0f1420;
+    --text-primary: #e6e9f0;
+    --text-secondary: #9aa4b8;
+    --text-muted: #6b7589;
+    --border-strong: #4d5669;
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  html, body { margin: 0; background: var(--surface-0); }
+  body { padding: 14px 16px; font-family: var(--font-sans); color: var(--text-primary); }
+  .head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  .sum { font-size: 14px; font-weight: 500; color: var(--text-primary); }
+  .sum span { font-weight: 400; color: var(--text-secondary); }
+  .time { font-size: 13px; color: var(--text-muted); white-space: nowrap; }
+  svg { display: block; width: 100%; height: auto; }
+  .lb { font-size: 14px; font-weight: 500; fill: #fff; font-family: var(--font-sans); }
+  .tk { font-size: 11px; fill: var(--text-muted); font-family: var(--font-sans); }
+</style>
+</head>
+<body>
+  <div class="head">
+    <div class="sum" id="sum"></div>
+    <div class="time" id="time"></div>
+  </div>
+  <div id="bar"></div>
+
+<script>
+const NYTZ = 'America/New_York';
+let VIEW_TZ = 'America/Toronto';
+try { VIEW_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || VIEW_TZ; } catch (e) {}
+
+const CITIES = [
+  { n: 'Sydney',   syd: true, col: '#1D9E75' },
+  { n: 'Tokyo',    tz: 'Asia/Tokyo',      o: 9, c: 18, col: '#D4537E' },
+  { n: 'London',   tz: 'Europe/London',   o: 8, c: 17, col: '#378ADD' },
+  { n: 'New York', tz: NYTZ,              o: 8, c: 17, col: '#BA7517' }
+];
+const SYD_START = 18;  // Sydney bắt đầu 18:00 giờ New York (1 tiếng sau khi New York đóng)
+const SYD_DUR = 9;
+
+const FM = {};
+function wall(tz, d) {
+  let f = FM[tz];
+  if (!f) {
+    f = FM[tz] = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric',
+      hour: 'numeric', minute: 'numeric', second: 'numeric', weekday: 'short'
+    });
+  }
+  const o = {};
+  for (const x of f.formatToParts(d)) o[x.type] = x.value;
+  return { wd: o.weekday, y: +o.year, mo: +o.month, da: +o.day, hh: +o.hour, mi: +o.minute, ss: +o.second };
+}
+function hourOf(tz, d) { const w = wall(tz, d); return w.hh + w.mi / 60 + w.ss / 3600; }
+function tzOffset(tz, d) {
+  const w = wall(tz, d);
+  return (Date.UTC(w.y, w.mo - 1, w.da, w.hh, w.mi, w.ss) - Math.floor(d.getTime() / 1000) * 1000) / 36e5;
+}
+function mod(a, n) { return ((a % n) + n) % n; }
+
+// Thị trường đóng từ 17:00 thứ Sáu đến 17:00 Chủ nhật (giờ New York)
+function weekendClosed(d) {
+  const w = wall(NYTZ, d);
+  const h = w.hh + w.mi / 60;
+  if (w.wd === 'Sat') return true;
+  if (w.wd === 'Fri' && h >= 17) return true;
+  if (w.wd === 'Sun' && h < 17) return true;
+  return false;
+}
+function isOpen(c, d) {
+  if (weekendClosed(d)) return false;
+  if (c.syd) return mod(hourOf(NYTZ, d) - SYD_START, 24) < SYD_DUR;
+  const h = hourOf(c.tz, d);
+  return h >= c.o && h < c.c;
+}
+function nextOpenMins(c, now) {
+  for (let s = 1; s <= 672; s++) {
+    if (isOpen(c, new Date(now.getTime() + s * 900000))) {
+      for (let f = (s - 1) * 15 + 1; f <= s * 15; f++) {
+        if (isOpen(c, new Date(now.getTime() + f * 60000))) return f;
+      }
+      return s * 15;
+    }
+  }
+  return null;
+}
+function fmtDur(m) {
+  if (m >= 1440) return Math.floor(m / 1440) + ' ngày ' + Math.floor((m % 1440) / 60) + 'h';
+  if (m < 60) return m + 'p';
+  return Math.floor(m / 60) + 'h ' + (m % 60) + 'p';
+}
+function pad2(n) { return String(n).padStart(2, '0'); }
+function fmtHour(x) {
+  let h = Math.floor(x + 1e-9), m = Math.round((x - h) * 60);
+  if (m === 60) { h = (h + 1) % 24; m = 0; }
+  return m === 0 ? pad2(h) : pad2(h) + ':' + pad2(m);
+}
+function fmtClock(d) {
+  return new Intl.DateTimeFormat('en-GB', { timeZone: VIEW_TZ, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(d);
+}
+
+const X0 = 8, WID = 664, TOP = 14, BOT = 66;
+function xh(h) { return X0 + h / 24 * WID; }
+
+function render() {
+  const now = new Date();
+  const offNY = tzOffset(NYTZ, now), offV = tzOffset(VIEW_TZ, now);
+
+  // Vị trí mở/đóng của từng phiên, tính từ lúc Sydney bắt đầu (đơn vị: giờ)
+  const inst = [];
+  CITIES.forEach((c, i) => {
+    let rel, dur;
+    if (c.syd) { rel = 0; dur = SYD_DUR; }
+    else { rel = mod(c.o - tzOffset(c.tz, now) + offNY - SYD_START, 24); dur = c.c - c.o; }
+    for (const k of [-1, 0, 1]) inst.push({ i, o: rel + 24 * k, cl: rel + 24 * k + dur });
+  });
+  inst.sort((a, b) => a.o - b.o);
+
+  let polys = '', labels = '';
+  const covered = [];
+  for (let j = 1; j < inst.length - 1; j++) {
+    const it = inst[j], prev = inst[j - 1], next = inst[j + 1];
+    const tl = it.o;
+    const bl = prev.cl > it.o ? prev.cl : it.o;     // phiên cũ còn chạy ở phía dưới
+    const tr = next.o < it.cl ? next.o : it.cl;     // phiên mới lớn dần từ mép trên
+    const br = it.cl;
+    if (br <= 0 || tl >= 24) continue;
+    covered.push([Math.max(0, tl), Math.min(24, br)]);
+    polys += `<polygon points="${xh(tl)},${TOP} ${xh(tr)},${TOP} ${xh(br)},${BOT} ${xh(bl)},${BOT}" fill="${CITIES[it.i].col}" style="stroke:var(--surface-0);stroke-width:2;stroke-linejoin:miter"/>`;
+    const a = Math.max(0, (tl + bl) / 2), b = Math.min(24, (tr + br) / 2);
+    if (b - a >= 2.4) {
+      labels += `<text class="lb" x="${xh((a + b) / 2)}" y="${(TOP + BOT) / 2}" text-anchor="middle" dominant-baseline="central">${CITIES[it.i].n}</text>`;
+    }
+  }
+
+  // Ô break: khoảng không có phiên nào
+  covered.sort((a, b) => a[0] - b[0]);
+  let gaps = '', gapLabel = '';
+  let cur = 0;
+  for (const [a, b] of covered) {
+    if (a - cur > 0.05) {
+      gaps += `<rect x="${xh(cur)}" y="${TOP}" width="${xh(a) - xh(cur)}" height="${BOT - TOP}" fill="none" style="stroke:var(--border-strong);stroke-width:1;stroke-dasharray:3 3"/>`;
+      const right = a >= 23.95;
+      gapLabel += `<text class="tk" x="${right ? xh(a) : xh((cur + a) / 2)}" y="90" text-anchor="${right ? 'end' : 'middle'}">Break</text>`;
+    }
+    cur = Math.max(cur, b);
+  }
+  if (24 - cur > 0.05) {
+    gaps += `<rect x="${xh(cur)}" y="${TOP}" width="${xh(24) - xh(cur)}" height="${BOT - TOP}" fill="none" style="stroke:var(--border-strong);stroke-width:1;stroke-dasharray:3 3"/>`;
+    gapLabel += `<text class="tk" x="${xh(24)}" y="90" text-anchor="end">Break</text>`;
+  }
+
+  // Số giờ dưới thanh = giờ trên đồng hồ của máy bạn
+  const startV = mod(SYD_START - offNY + offV, 24);
+  let ticks = '';
+  for (let r = 0; r < 24; r += 3) {
+    ticks += `<text class="tk" x="${xh(r)}" y="90" text-anchor="${r === 0 ? 'start' : 'middle'}">${fmtHour(mod(startV + r, 24))}</text>`;
+  }
+
+  const nx = xh(mod(hourOf(NYTZ, now) - SYD_START, 24));
+  const svg = `<svg viewBox="0 0 680 104" role="img" aria-label="Thanh 24 giờ các phiên forex bắt đầu từ Sydney, có khoảng break sau New York">
+    <defs><clipPath id="clipbar"><rect x="${X0}" y="${TOP}" width="${WID}" height="${BOT - TOP}"/></clipPath></defs>
+    <g clip-path="url(#clipbar)">${polys}</g>
+    ${gaps}
+    <rect x="${X0}" y="${TOP}" width="${WID}" height="${BOT - TOP}" fill="none" style="stroke:var(--border-strong);stroke-width:1"/>
+    ${labels}
+    <rect x="${nx - 1}" y="${TOP - 7}" width="2" height="${BOT - TOP + 14}" style="fill:var(--text-primary)"/>
+    ${ticks}${gapLabel}
+  </svg>`;
+  document.getElementById('bar').innerHTML = svg;
+
+  const openNames = CITIES.filter(c => isOpen(c, now)).map(c => c.n);
+  let sum;
+  if (openNames.length >= 2) sum = 'Đang chồng lên nhau: ' + openNames.join(' và ');
+  else if (openNames.length === 1) sum = 'Đang mở: ' + openNames[0];
+  else sum = 'Không có phiên nào mở';
+  let best = null;
+  CITIES.forEach(c => {
+    if (isOpen(c, now)) return;
+    const m = nextOpenMins(c, now);
+    if (m !== null && (!best || m < best.m)) best = { n: c.n, m };
+  });
+  if (best) sum += ' <span>· ' + best.n + ' mở sau ' + fmtDur(best.m) + '</span>';
+  document.getElementById('sum').innerHTML = sum;
+  document.getElementById('time').textContent = fmtClock(now) + ' · ' + VIEW_TZ.split('/').pop().replace(/_/g, ' ');
+}
+render();
+setInterval(render, 10000);
+</script>
+</body>
+</html>
